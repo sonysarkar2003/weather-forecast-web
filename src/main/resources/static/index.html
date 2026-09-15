@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Location Weather App | Spring Boot</title>
+    <meta name="description" content="Real-time live location weather application showing temperature, humidity, rain probability percentage, and forecast.">
+    
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    
+    <!-- Font Awesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="css/styles.css">
+</head>
+<body class="theme-clear">
+    <div class="background-overlay"></div>
+    
+    <div class="app-container">
+        <!-- Header / Search Bar -->
+        <header class="app-header">
+            <div class="brand">
+                <i class="fa-solid fa-cloud-sun-rain brand-icon"></i>
+                <span class="brand-title">SkyPulse</span>
+                <span class="badge-live"><i class="fa-solid fa-circle pulse-dot"></i> Live Backend</span>
+            </div>
+
+            <!-- Search Box with Autocomplete -->
+            <div class="search-container">
+                <div class="search-input-wrapper">
+                    <i class="fa-solid fa-magnifying-glass search-icon"></i>
+                    <input type="text" id="citySearchInput" placeholder="Search city or location..." autocomplete="off">
+                    <button type="button" id="clearSearchBtn" class="clear-btn hidden"><i class="fa-solid fa-xmark"></i></button>
+                </div>
+                <div id="autocompleteDropdown" class="autocomplete-dropdown hidden"></div>
+            </div>
+
+            <!-- Actions -->
+            <div class="header-actions">
+                <button type="button" id="geoLocateBtn" class="action-btn" title="Detect Live Location">
+                    <i class="fa-solid fa-location-crosshairs"></i>
+                    <span>Live Location</span>
+                </button>
+                <div class="unit-toggle" id="unitToggle">
+                    <button type="button" class="unit-btn active" data-unit="C">°C</button>
+                    <button type="button" class="unit-btn" data-unit="F">°F</button>
+                </div>
+            </div>
+        </header>
+
+        <!-- Quick City Selector Chips -->
+        <section class="quick-cities">
+            <span class="quick-label">Popular:</span>
+            <button class="city-chip" data-city="New Delhi">New Delhi</button>
+            <button class="city-chip" data-city="London">London</button>
+            <button class="city-chip" data-city="New York">New York</button>
+            <button class="city-chip" data-city="Tokyo">Tokyo</button>
+            <button class="city-chip" data-city="Paris">Paris</button>
+            <button class="city-chip" data-city="Sydney">Sydney</button>
+        </section>
+
+        <!-- Main Content Area -->
+        <main class="main-content" id="mainContent">
+            <!-- Loading Indicator -->
+            <div id="loadingState" class="loading-state">
+                <div class="spinner"></div>
+                <p>Detecting live location and fetching weather data...</p>
+            </div>
+
+            <!-- Error State -->
+            <div id="errorState" class="error-card hidden">
+                <i class="fa-solid fa-triangle-exclamation error-icon"></i>
+                <h3 id="errorMessage">Unable to fetch weather data</h3>
+                <button id="retryBtn" class="primary-btn">Retry Live Location</button>
+            </div>
+
+            <!-- Weather Dashboard Grid (Hidden while loading) -->
+            <div id="weatherDashboard" class="weather-dashboard hidden">
+                <!-- Location & Timestamp Header -->
+                <div class="location-banner">
+                    <div class="location-info">
+                        <h1 id="cityName" class="city-name"><i class="fa-solid fa-location-dot"></i> <span>--</span></h1>
+                        <p id="regionCountry" class="region-country">--</p>
+                        <p class="coords-info"><i class="fa-solid fa-compass"></i> Lat: <span id="latVal">--</span>, Lon: <span id="lonVal">--</span></p>
+                    </div>
+                    <div class="updated-time">
+                        <span class="last-updated-label">Last Updated:</span>
+                        <span id="lastUpdatedTime">Just now</span>
+                        <button id="refreshDataBtn" class="icon-btn" title="Refresh weather data"><i class="fa-solid fa-rotate-right"></i></button>
+                    </div>
+                </div>
+
+                <!-- Hero Section: Current Weather & 3 Core Featured Cards -->
+                <section class="hero-grid">
+                    <!-- Main Temperature Card -->
+                    <div class="card card-hero-weather">
+                        <div class="hero-condition-icon" id="heroIconContainer">
+                            <i class="fa-solid fa-sun weather-hero-icon" id="heroWeatherIcon"></i>
+                        </div>
+                        <div class="hero-temp-details">
+                            <div class="temp-wrapper">
+                                <span class="temp-value" id="currentTemp">--</span>
+                                <span class="temp-unit" id="displayUnit">°C</span>
+                            </div>
+                            <div class="condition-text" id="conditionText">Clear Sky</div>
+                            <div class="temp-feels-like">
+                                Feels like <span id="feelsLikeTemp">--</span>° <span class="feels-unit">C</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Core Feature Card 1: HUMIDITY PERCENTAGE -->
+                    <div class="card card-metric metric-humidity">
+                        <div class="metric-header">
+                            <span class="metric-title"><i class="fa-solid fa-droplet"></i> Humidity</span>
+                            <span class="metric-badge" id="humidityStatusBadge">Normal</span>
+                        </div>
+                        <div class="metric-main-value">
+                            <span id="humidityVal" class="huge-val">--</span><span class="unit-pct">%</span>
+                        </div>
+                        <div class="progress-bar-container">
+                            <div class="progress-bar-fill humidity-fill" id="humidityBar" style="width: 0%;"></div>
+                        </div>
+                        <div class="metric-subtext" id="humiditySubtext">
+                            Moisture level in the air
+                        </div>
+                    </div>
+
+                    <!-- Core Feature Card 2: RAIN PROBABILITY PERCENTAGE -->
+                    <div class="card card-metric metric-rain">
+                        <div class="metric-header">
+                            <span class="metric-title"><i class="fa-solid fa-umbrella"></i> Rain Probability</span>
+                            <span class="metric-badge rain-badge" id="rainStatusBadge">Low Risk</span>
+                        </div>
+                        <div class="metric-main-value">
+                            <span id="rainProbVal" class="huge-val">--</span><span class="unit-pct">%</span>
+                        </div>
+                        <div class="progress-bar-container">
+                            <div class="progress-bar-fill rain-fill" id="rainProbBar" style="width: 0%;"></div>
+                        </div>
+                        <div class="metric-subtext" id="rainProbSubtext">
+                            Chance of precipitation today
+                        </div>
+                    </div>
+
+                    <!-- Auxiliary Metric: Wind Speed -->
+                    <div class="card card-metric metric-wind">
+                        <div class="metric-header">
+                            <span class="metric-title"><i class="fa-solid fa-wind"></i> Wind Speed</span>
+                        </div>
+                        <div class="metric-main-value">
+                            <span id="windSpeedVal" class="huge-val">--</span><span class="unit-pct">km/h</span>
+                        </div>
+                        <div class="metric-subtext">
+                            <i class="fa-solid fa-gauge-high"></i> Air movement velocity
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Hourly Forecast Timeline Section -->
+                <section class="forecast-section">
+                    <h2 class="section-title"><i class="fa-solid fa-clock"></i> 24-Hour Hourly Forecast</h2>
+                    <div class="hourly-scroll-container" id="hourlyContainer">
+                        <!-- Dynamic Hourly Cards inserted by JS -->
+                    </div>
+                </section>
+
+                <!-- 7-Day Extended Forecast Section -->
+                <section class="forecast-section">
+                    <h2 class="section-title"><i class="fa-solid fa-calendar-days"></i> 7-Day Extended Forecast</h2>
+                    <div class="daily-grid" id="dailyContainer">
+                        <!-- Dynamic Daily Cards inserted by JS -->
+                    </div>
+                </section>
+            </div>
+        </main>
+
+        <!-- Footer -->
+        <footer class="app-footer">
+            <p>SkyPulse Weather App • Java Spring Boot Backend • Powered by Open-Meteo API</p>
+        </footer>
+    </div>
+
+    <!-- Application JavaScript -->
+    <script src="js/app.js"></script>
+</body>
+</html>
