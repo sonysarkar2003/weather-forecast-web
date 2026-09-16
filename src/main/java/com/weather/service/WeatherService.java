@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.weather.dto.*;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriComponentsBuilder;
@@ -19,11 +20,208 @@ public class WeatherService {
     @Autowired
     private RestTemplate restTemplate;
 
+    @Value("${weather.api.key:}")
+    private String weatherApiKey;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public WeatherResponse getWeatherByCoordinates(double lat, double lon, String overrideCityName, String overrideRegion, String overrideCountry) {
+        if (hasWeatherApiKey()) {
+            try {
+                return getWeatherFromWeatherApi(lat + "," + lon, overrideCityName, overrideRegion, overrideCountry);
+            } catch (Exception e) {
+                System.err.println("WeatherAPI.com request failed, falling back to Open-Meteo: " + e.getMessage());
+            }
+        }
+        return getWeatherFromOpenMeteo(lat, lon, overrideCityName, overrideRegion, overrideCountry);
+    }
+
+    public WeatherResponse getWeatherByCity(String city) {
+        if (hasWeatherApiKey()) {
+            try {
+                return getWeatherFromWeatherApi(city, null, null, null);
+            } catch (Exception e) {
+                System.err.println("WeatherAPI.com city search failed, falling back to Open-Meteo: " + e.getMessage());
+            }
+        }
+        return getWeatherByCityOpenMeteo(city);
+    }
+
+    public List<LocationDTO> searchCities(String query) {
+        if (hasWeatherApiKey()) {
+            try {
+                return searchCitiesWeatherApi(query);
+            } catch (Exception ignored) {}
+        }
+        return searchCitiesOpenMeteo(query);
+    }
+
+    private boolean hasWeatherApiKey() {
+        return weatherApiKey != null && !weatherApiKey.trim().isEmpty() && !weatherApiKey.equalsIgnoreCase("YOUR_API_KEY");
+    }
+
+    // ==========================================
+    // WeatherAPI.com Integration Implementation
+    // ==========================================
+    private WeatherResponse getWeatherFromWeatherApi(String query, String overrideCityName, String overrideRegion, String overrideCountry) {
+        String url = UriComponentsBuilder.fromHttpUrl("https://api.weatherapi.com/v1/forecast.json")
+                .queryParam("key", weatherApiKey.trim())
+                .queryParam("q", query)
+                .queryParam("days", 7)
+                .queryParam("aqi", "no")
+                .queryParam("alerts", "no")
+                .build().toUriString();
+
+        String responseJson = restTemplate.getForObject(url, String.class);
         try {
-            // 1. Fetch Forecast from Open-Meteo API
+            JsonNode root = objectMapper.readTree(responseJson);
+
+            // 1. Location
+            JsonNode locNode = root.path("location");
+            LocationDTO location = new LocationDTO();
+            location.setName(overrideCityName != null ? overrideCityName : locNode.path("name").asText());
+            location.setRegion(overrideRegion != null ? overrideRegion : locNode.path("region").asText(""));
+            location.setCountry(overrideCountry != null ? overrideCountry : locNode.path("country").asText(""));
+            location.setLatitude(locNode.path("lat").asDouble(0.0));
+            location.setLongitude(locNode.path("lon").asDouble(0.0));
+
+            // 2. Current Weather
+            JsonNode currNode = root.path("current");
+            CurrentWeatherDTO currentWeather = new CurrentWeatherDTO();
+            currentWeather.setTemperature(currNode.path("temp_c").asDouble(0.0));
+            currentWeather.setHumidity(currNode.path("humidity").asInt(0));
+            currentWeather.setFeelsLike(currNode.path("feelslike_c").asDouble(currentWeather.getTemperature()));
+            currentWeather.setWindSpeed(currNode.path("wind_kph").asDouble(0.0));
+            currentWeather.setDay(currNode.path("is_day").asInt(1) == 1);
+            
+            JsonNode condNode = currNode.path("condition");
+            String condText = condNode.path("text").asText("Clear");
+            int code = condNode.path("code").asInt(1000);
+            currentWeather.setWeatherCode(code);
+            currentWeather.setWeatherCondition(condText);
+            currentWeather.setWeatherIcon(mapWeatherApiCodeToIcon(code, currentWeather.isDay()));
+            currentWeather.setTimestamp(currNode.path("last_updated").asText(LocalDateTime.now().toString()));
+
+            // 3. Hourly & Daily Forecast
+            List<HourlyForecastDTO> hourlyList = new ArrayList<>();
+            List<DailyForecastDTO> dailyList = new ArrayList<>();
+
+            JsonNode forecastDays = root.path("forecast").path("forecastday");
+
+            // Extract Current Rain Probability % from Today's Day or First Hour
+            if (forecastDays.isArray() && forecastDays.size() > 0) {
+                JsonNode todayNode = forecastDays.get(0);
+                int todayRainProb = todayNode.path("day").path("daily_chance_of_rain").asInt(0);
+                
+                // Hour 0 or current hour
+                JsonNode hours = todayNode.path("hour");
+                if (hours.isArray() && hours.size() > 0) {
+                    todayRainProb = hours.get(0).path("chance_of_rain").asInt(todayRainProb);
+                }
+                currentWeather.setRainProbability(todayRainProb);
+
+                // Map 24 Hourly Items from Today's forecastday
+                int hourlyLimit = Math.min(24, hours.size());
+                for (int i = 0; i < hourlyLimit; i++) {
+                    JsonNode h = hours.get(i);
+                    String rawTime = h.path("time").asText();
+                    String formattedTime = formatHourlyTime(rawTime);
+                    double temp = h.path("temp_c").asDouble();
+                    int hum = h.path("humidity").asInt();
+                    int rainProb = h.path("chance_of_rain").asInt();
+                    int hCode = h.path("condition").path("code").asInt(1000);
+                    String hCond = h.path("condition").path("text").asText("Clear");
+
+                    hourlyList.add(new HourlyForecastDTO(
+                            formattedTime,
+                            temp,
+                            hum,
+                            rainProb,
+                            hCond,
+                            mapWeatherApiCodeToIcon(hCode, true)
+                    ));
+                }
+            }
+
+            // Map Daily Items
+            if (forecastDays.isArray()) {
+                int dailyLimit = Math.min(7, forecastDays.size());
+                for (int i = 0; i < dailyLimit; i++) {
+                    JsonNode d = forecastDays.get(i);
+                    String rawDate = d.path("date").asText();
+                    String dayName = formatDayName(rawDate, i);
+                    JsonNode dayInfo = d.path("day");
+
+                    double maxT = dayInfo.path("maxtemp_c").asDouble();
+                    double minT = dayInfo.path("mintemp_c").asDouble();
+                    int rainProb = dayInfo.path("daily_chance_of_rain").asInt();
+                    int dCode = dayInfo.path("condition").path("code").asInt(1000);
+                    String dCond = dayInfo.path("condition").path("text").asText();
+
+                    dailyList.add(new DailyForecastDTO(
+                            rawDate,
+                            dayName,
+                            maxT,
+                            minT,
+                            rainProb,
+                            dCond,
+                            mapWeatherApiCodeToIcon(dCode, true)
+                    ));
+                }
+            }
+
+            return new WeatherResponse(location, currentWeather, hourlyList, dailyList);
+
+        } catch (Exception e) {
+            throw new RuntimeException("Error parsing WeatherAPI response: " + e.getMessage(), e);
+        }
+    }
+
+    private List<LocationDTO> searchCitiesWeatherApi(String query) {
+        List<LocationDTO> resultsList = new ArrayList<>();
+        String url = UriComponentsBuilder.fromHttpUrl("https://api.weatherapi.com/v1/search.json")
+                .queryParam("key", weatherApiKey.trim())
+                .queryParam("q", query)
+                .build().toUriString();
+
+        String response = restTemplate.getForObject(url, String.class);
+        try {
+            JsonNode root = objectMapper.readTree(response);
+            if (root.isArray()) {
+                for (JsonNode node : root) {
+                    String name = node.path("name").asText();
+                    String region = node.path("region").asText("");
+                    String country = node.path("country").asText("");
+                    double lat = node.path("lat").asDouble();
+                    double lon = node.path("lon").asDouble();
+
+                    resultsList.add(new LocationDTO(name, region, country, lat, lon));
+                }
+            }
+        } catch (Exception ignored) {}
+        return resultsList;
+    }
+
+    private String mapWeatherApiCodeToIcon(int code, boolean isDay) {
+        // WeatherAPI condition codes
+        return switch (code) {
+            case 1000 -> isDay ? "sun" : "moon"; // Sunny / Clear
+            case 1003, 1006 -> isDay ? "cloud-sun" : "cloud-moon"; // Partly cloudy
+            case 1009, 1030 -> "cloud"; // Overcast / Mist
+            case 1135, 1147 -> "smog"; // Fog
+            case 1063, 1150, 1153, 1180, 1183 -> "cloud-rain"; // Light rain / drizzle
+            case 1186, 1189, 1192, 1195, 1240, 1243 -> "cloud-showers-heavy"; // Heavy rain / showers
+            case 1066, 1114, 1210, 1213, 1216, 1219, 1222, 1225 -> "snowflake"; // Snow
+            case 1087, 1273, 1276, 1279, 1282 -> "cloud-bolt"; // Thunderstorm
+            default -> isDay ? "sun" : "moon";
+        };
+    }
+
+    // ==========================================
+    // Open-Meteo Fallback Implementation
+    // ==========================================
+    private WeatherResponse getWeatherFromOpenMeteo(double lat, double lon, String overrideCityName, String overrideRegion, String overrideCountry) {
+        try {
             String forecastUrl = UriComponentsBuilder.fromHttpUrl("https://api.open-meteo.com/v1/forecast")
                     .queryParam("latitude", lat)
                     .queryParam("longitude", lon)
@@ -36,7 +234,6 @@ public class WeatherService {
             String responseJson = restTemplate.getForObject(forecastUrl, String.class);
             JsonNode root = objectMapper.readTree(responseJson);
 
-            // 2. Determine Location Details if not overridden
             LocationDTO location = new LocationDTO();
             location.setLatitude(lat);
             location.setLongitude(lon);
@@ -52,7 +249,6 @@ public class WeatherService {
                 location.setCountry(reverseLoc.getCountry());
             }
 
-            // 3. Map Current Weather
             JsonNode current = root.path("current");
             JsonNode hourly = root.path("hourly");
 
@@ -68,7 +264,6 @@ public class WeatherService {
             currentWeather.setWeatherIcon(getWeatherIcon(code, currentWeather.isDay()));
             currentWeather.setTimestamp(current.path("time").asText(LocalDateTime.now().toString()));
 
-            // Current Rain Probability percentage from current hour index
             int currentRainProb = 0;
             if (hourly.has("precipitation_probability") && hourly.path("precipitation_probability").isArray()) {
                 JsonNode probArray = hourly.path("precipitation_probability");
@@ -78,7 +273,6 @@ public class WeatherService {
             }
             currentWeather.setRainProbability(currentRainProb);
 
-            // 4. Map Hourly Forecast (next 24 hours)
             List<HourlyForecastDTO> hourlyList = new ArrayList<>();
             JsonNode hourlyTime = hourly.path("time");
             JsonNode hourlyTemp = hourly.path("temperature_2m");
@@ -105,7 +299,6 @@ public class WeatherService {
                 ));
             }
 
-            // 5. Map Daily Forecast (next 7 days)
             List<DailyForecastDTO> dailyList = new ArrayList<>();
             JsonNode daily = root.path("daily");
             JsonNode dailyTime = daily.path("time");
@@ -137,11 +330,11 @@ public class WeatherService {
             return new WeatherResponse(location, currentWeather, hourlyList, dailyList);
 
         } catch (Exception e) {
-            throw new RuntimeException("Failed to fetch weather data: " + e.getMessage(), e);
+            throw new RuntimeException("Failed to fetch weather data from Open-Meteo: " + e.getMessage(), e);
         }
     }
 
-    public WeatherResponse getWeatherByCity(String city) {
+    private WeatherResponse getWeatherByCityOpenMeteo(String city) {
         try {
             String geoUrl = UriComponentsBuilder.fromHttpUrl("https://geocoding-api.open-meteo.com/v1/search")
                     .queryParam("name", city)
@@ -163,14 +356,14 @@ public class WeatherService {
             String region = firstResult.path("admin1").asText("");
             String country = firstResult.path("country").asText("");
 
-            return getWeatherByCoordinates(lat, lon, name, region, country);
+            return getWeatherFromOpenMeteo(lat, lon, name, region, country);
 
         } catch (Exception e) {
             throw new RuntimeException("City search error: " + e.getMessage(), e);
         }
     }
 
-    public List<LocationDTO> searchCities(String query) {
+    private List<LocationDTO> searchCitiesOpenMeteo(String query) {
         List<LocationDTO> resultsList = new ArrayList<>();
         if (query == null || query.trim().length() < 2) {
             return resultsList;
@@ -262,12 +455,16 @@ public class WeatherService {
         };
     }
 
-    private String formatHourlyTime(String isoString) {
+    private String formatHourlyTime(String rawTime) {
         try {
-            LocalDateTime dt = LocalDateTime.parse(isoString);
+            if (rawTime.contains(" ")) {
+                LocalDateTime dt = LocalDateTime.parse(rawTime, DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"));
+                return dt.format(DateTimeFormatter.ofPattern("ha")).toLowerCase();
+            }
+            LocalDateTime dt = LocalDateTime.parse(rawTime);
             return dt.format(DateTimeFormatter.ofPattern("ha")).toLowerCase();
         } catch (Exception e) {
-            return isoString;
+            return rawTime;
         }
     }
 
